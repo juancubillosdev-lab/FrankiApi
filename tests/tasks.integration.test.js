@@ -282,3 +282,127 @@ describe('Unknown routes', () => {
     expect(res.body.error).toBe('Route not found');
   });
 });
+
+// ─── Content-Type de respuestas ───────────────────────────────────────────────
+
+describe('Response Content-Type', () => {
+  it('GET /health responds with application/json', async () => {
+    const res = await request(app).get('/health');
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+  });
+
+  it('GET /api/v1/tasks responds with application/json', async () => {
+    const res = await request(app).get(BASE);
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+  });
+
+  it('POST /api/v1/tasks responds with application/json', async () => {
+    const res = await request(app).post(BASE).send({ title: 'T' });
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+  });
+});
+
+// ─── Status en POST ───────────────────────────────────────────────────────────
+
+describe('POST /api/v1/tasks – status field', () => {
+  it('201 – defaults status to "pending" when not provided', async () => {
+    const res = await request(app).post(BASE).send({ title: 'T' });
+    expect(res.body.data.status).toBe('pending');
+  });
+
+  it('201 – accepts status "progress"', async () => {
+    const res = await request(app).post(BASE).send({ title: 'T', status: 'progress' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.status).toBe('progress');
+  });
+
+  it('201 – accepts status "completed"', async () => {
+    const res = await request(app).post(BASE).send({ title: 'T', status: 'completed' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.status).toBe('completed');
+  });
+
+  it('400 – rejects invalid status value', async () => {
+    const res = await request(app).post(BASE).send({ title: 'T', status: 'invalid' });
+    expect(res.status).toBe(400);
+  });
+});
+
+// ─── Timestamps en respuesta ──────────────────────────────────────────────────
+
+describe('POST /api/v1/tasks – timestamps', () => {
+  it('response includes createdAt and updatedAt as ISO strings', async () => {
+    const res = await request(app).post(BASE).send({ title: 'T' });
+    expect(res.body.data.createdAt).toBeDefined();
+    expect(res.body.data.updatedAt).toBeDefined();
+    expect(() => new Date(res.body.data.createdAt)).not.toThrow();
+    expect(() => new Date(res.body.data.updatedAt)).not.toThrow();
+  });
+
+  it('createdAt and updatedAt are equal on creation', async () => {
+    const res = await request(app).post(BASE).send({ title: 'T' });
+    expect(res.body.data.createdAt).toBe(res.body.data.updatedAt);
+  });
+});
+
+// ─── PUT – status y timestamps ────────────────────────────────────────────────
+
+describe('PUT /api/v1/tasks/:id – status and timestamps', () => {
+  let taskId;
+  let createdAt;
+
+  beforeEach(async () => {
+    const res = await request(app).post(BASE).send({ title: 'Original' });
+    taskId = res.body.data.id;
+    createdAt = res.body.data.createdAt;
+  });
+
+  it('200 – updates status to "progress"', async () => {
+    const res = await request(app).put(`${BASE}/${taskId}`).send({ status: 'progress' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('progress');
+  });
+
+  it('200 – updates status to "completed"', async () => {
+    const res = await request(app).put(`${BASE}/${taskId}`).send({ status: 'completed' });
+    expect(res.body.data.status).toBe('completed');
+  });
+
+  it('400 – rejects invalid status on update', async () => {
+    const res = await request(app).put(`${BASE}/${taskId}`).send({ status: 'invalid' });
+    expect(res.status).toBe(400);
+  });
+
+  it('updatedAt changes after update, createdAt stays the same', async () => {
+    await new Promise((r) => setTimeout(r, 10));
+    const res = await request(app).put(`${BASE}/${taskId}`).send({ title: 'Changed' });
+    expect(res.body.data.createdAt).toBe(createdAt);
+    expect(res.body.data.updatedAt).not.toBe(createdAt);
+  });
+});
+
+// ─── Concurrencia a nivel HTTP ────────────────────────────────────────────────
+
+describe('Concurrent requests – mutex at HTTP level', () => {
+  it('10 concurrent POSTs produce 10 tasks without data loss', async () => {
+    const requests = Array.from({ length: 10 }, (_, i) =>
+      request(app).post(BASE).send({ title: `Concurrent ${i}` }),
+    );
+    await Promise.all(requests);
+    const res = await request(app).get(`${BASE}?limit=100`);
+    expect(res.body.pagination.total).toBe(10);
+  });
+
+  it('concurrent DELETEs on different tasks all succeed', async () => {
+    const created = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        request(app).post(BASE).send({ title: `Del ${i}` }),
+      ),
+    );
+    const ids = created.map((r) => r.body.data.id);
+    const deletes = await Promise.all(ids.map((id) => request(app).delete(`${BASE}/${id}`)));
+    deletes.forEach((r) => expect(r.status).toBe(204));
+    const res = await request(app).get(BASE);
+    expect(res.body.pagination.total).toBe(0);
+  });
+});
